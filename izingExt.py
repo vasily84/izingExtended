@@ -62,7 +62,7 @@ def inverseSpin(lattice,i,j):
 
 class CLattice2d():
     """ двумерная решетка Изинга """
-    def __init__(self,XSIZE=50,YSIZE=50,Aij=1,Hext=0,kT=30.2):
+    def __init__(self,XSIZE=200,YSIZE=200,Aij=0.1,Hext=0,kT=0.1):
         """ размер X, размер Y, константа обменного взаимодействия, поле, температура """
         self.XSIZE = XSIZE
         self.YSIZE = YSIZE
@@ -76,30 +76,62 @@ class CLattice2d():
         self.fileDir = 'workdir'
         self.init_lattice()
 
-    def init_lattice(self):
+    def init_lattice(self,kind=0):
+        """ инициализировать решетку """
+        self.init_izing(kind)
+
+    def init_izing(self,kind):
         """ инициализировать решетку """
         self.lattice[:]=-1. #
-        self.spinSumm = -1*self.SPIN_CNT
-        for _ in range(self.XSIZE*20): # инициализируем часть спинов в противоположную сторону
-            i = np.random.randint(0,self.XSIZE)
-            j = np.random.randint(0,self.YSIZE)
-            if self.lattice[i,j]<0:
+        if kind==0:
+            for _ in range(self.XSIZE*20): # инициализируем часть спинов в противоположную сторону
+                i = np.random.randint(0,self.XSIZE)
+                j = np.random.randint(0,self.YSIZE)
                 self.lattice[i,j] = 1
-                self.spinSumm +=1
-                if self.spinSumm>=0: # примерное равновесие по спинам
-                    break
+        elif kind==1:
+            for i in range(self.XSIZE):
+                for j in range(self.YSIZE):
+                    r = self.XSIZE/3
+                    r2 = r*r
+                    a = i-self.XSIZE/2
+                    b = j-self.YSIZE/2
+                    r2_ab = a*a+b*b
+                    if r2_ab<r2:
+                        self.lattice[i,j] = 1
+        elif kind==2:
+            for i in range(self.XSIZE):
+                for j in range(self.YSIZE):
+                    if (i%10<5)and(j%10<5):
+                        self.lattice[i,j] = 1
 
-    def shake_lattice(self,Ncount=500):
-        CLattice2d._izing2d_shake_lattice(Ncount,self.Hext,self.lattice,self.Aij_lattice,self.kT_lattice,self.XSIZE,self.YSIZE,self.spinSumm)
         self.spinSumm = np.sum(self.lattice)
-        print("Mtotal={} ,Energy={}".format(self.spinSumm/self.SPIN_CNT,self.calculate_full_energy()))
+    
+    def init_subLattice(self,subLattice,x0,x1,y0,y1):
+        """ инициализировать подрешетку по линейному закону.
+        x0 - значение верхний левый, x1 -верхний правый, 
+        y0 - нижний левый, y1 - нижний правый """
+        for i in range(self.XSIZE): 
+            A = x0+i*(x1-x0)/self.XSIZE # уровень верхний
+            B = y0+i*(y1-y0)/self.XSIZE # уровень нижний
+            for j in range(self.YSIZE):
+                subLattice[i,j] = A+j*(B-A)/self.YSIZE
+
+
+    def shake_lattice(self,Ncount=50):
+        A = CLattice2d._izing2d_shake_lattice(Ncount,self.Hext,self.lattice,self.Aij_lattice,self.kT_lattice)
+        self.spinSumm = np.sum(self.lattice)
+        print("Adoptation = {}, Mtotal={} ,Energy={}".format(A/Ncount,self.spinSumm/self.SPIN_CNT,self.calculate_full_energy()))
+        return A/Ncount # возвращаем коеффициент принятия
+
 
     @staticmethod
-    @numba.njit
-    def _izing2d_shake_lattice(Ncount,Hext,lattice,Aij_lattice,kT_lattice,XSIZE,YSIZE,spinSumm):
+    @numba.njit(cache=True)
+    def _izing2d_shake_lattice(Ncount,Hext,spinLattice,Aij_lattice,kT_lattice):
         """ разыграть Ncount случайных узлов решетки"""
+        XSIZE,YSIZE = spinLattice.shape
         SPIN_CNT = XSIZE*YSIZE
-        spinSumm = np.sum(lattice)
+        spinSumm = np.sum(spinLattice)
+        acceptedCount = 0
 
         for _ in range(Ncount):
             i = np.random.randint(0,XSIZE)
@@ -111,11 +143,11 @@ class CLattice2d():
             jm = (j-1+YSIZE)%YSIZE
             
             # сумма спинов ближайших соседей, участвующих в обменном взаимодействии 
-            NearestSpinSumm = lattice[i,jp]+lattice[i,jm]+lattice[im,j]+lattice[ip,j]  
+            NearestSpinSumm = spinLattice[i,jp]+spinLattice[i,jm]+spinLattice[im,j]+spinLattice[ip,j]  
             Aij = Aij_lattice[i,j]
             
             # вычисляем 
-            if lattice[i,j]>0: # пробуем переход '+1'->'-1'
+            if spinLattice[i,j]>0: # пробуем переход '+1'->'-1'
                 M1 = spinSumm/SPIN_CNT 
                 #M1 = +1.  
                 E1 = -Aij*NearestSpinSumm-(Hext-M1)*M1 # Энергия в состоянии '+1'
@@ -130,23 +162,46 @@ class CLattice2d():
                 #M2 = +1.
                 E2 = -Aij*NearestSpinSumm-(Hext-M2)*M2 # Энергия в состоянии '-1'
 
-            #if self.test_Metropolis(E1,E2,self.kT_lattice[i,j]):
-            if test_HeatBath(E1,E2,kT_lattice[i,j]): 
-                spinSumm += inverseSpin(lattice,i,j)
-            #print("spinSumm="+str(spinSumm))
+            #if test_HeatBath(E1,E2,kT_lattice[i,j]): 
+            if test_Metropolis(E1,E2,kT_lattice[i,j]): 
+                spinSumm += inverseSpin(spinLattice,i,j)
+                acceptedCount += 1 # коеффициент принятия
+            
+        return acceptedCount
         
-    def task_video_to_equilibrium(self):
+    def task_video_to_equilibrium(self,kind=0):
         """ снять фильм с эволюцией доменной структуры к равновесию """
+        Acoef = [] # список хранит коеффициенты принятия
         Slides.begin_show()
         Slides.show(self.lattice)
         try:
-            for _ in range(100):
-                self.shake_lattice(self.SPIN_CNT*2)
-                Slides.show(self.lattice)
+            if kind==0: # просто эволюция со временем
+                for _ in range(400):
+                    a = self.shake_lattice(self.SPIN_CNT/10)
+                    Acoef.append(a)
+                    Slides.show(self.lattice)
+            elif kind==1: # эволюция со временем, температура меняется скачком
+                kT = 0.1
+                dkT = 0.03
+                self.kT_lattice[:] = kT
+                self.shake_lattice(self.SPIN_CNT*50) # начальное равновесие
+                for _ in range(100):
+                    for _ in range(10):
+                        a = self.shake_lattice(self.SPIN_CNT*5)
+                        Acoef.append(a)
+                        Slides.show(self.lattice)
+                    kT += dkT
+
+                    self.kT_lattice[:] = kT
+            Slides.show(self.lattice,'result.png') # картинка с финишем эволюции
         except KeyboardInterrupt: # cntr^C чтобы прекратить длительные вычисления досрочно
             pass
         finally: 
             Slides.end_show()
+            plt.plot(Acoef)
+            plt.xlabel('evolution')
+            plt.ylabel('adoption')
+            plt.show()
 
 
     def calculate_full_energy(self):
@@ -189,25 +244,6 @@ class CLattice2d():
         plt.ylabel('энергия')
         plt.show()
 
-    def task_magnetization(self):
-        """ измерить намагниченность """
-        temperature = np.linspace(0.1,3)
-        magnetization = np.zeros_like(temperature)
-    
-        self.kT_lattice[:] = 0.1
-        self.shake_lattice(self.SPIN_CNT*100) # стартовые разыгрывания, чтобы придти в равновесие
-           
-        for i in range(len(temperature)):
-            self.kT_lattice[:] = temperature[i]
-            self.shake_lattice(self.SPIN_CNT*10)
-                
-            magnetization[i] = self.spinSumm/self.SPIN_CNT
-        
-        plt.plot(temperature, magnetization)
-        plt.xlabel('температура')
-        plt.ylabel('намагниченность')
-        plt.show()
-
 
 class CSlideShow():
     def __init__(self):
@@ -221,13 +257,16 @@ class CSlideShow():
         self.pngFiles = []
         self.pngCount = 0
 
-    def show(self,lattice):
+    def show(self,lattice,fileName=None):
         """ сохранить картинку решетки в файл """
-        fname = "framefile_%08d.png" % self.pngCount
-        imageio.imwrite(fname, lattice)
-        self.pngFiles.append(fname)
-        self.pngCount += 1
-        
+        if fileName is None:
+            fname = "framefile_%08d.png" % self.pngCount
+            imageio.imwrite(fname, lattice)
+            self.pngFiles.append(fname)
+            self.pngCount += 1
+        else:
+            imageio.imwrite(fileName, lattice)
+            
     def end_show(self,fileName='untitled.mp4'):
         """ собрать картинки в один видеофайл, удалить временные картинки """
         if os.path.isfile(fileName):
@@ -245,10 +284,12 @@ def main():
     global Slides
     Slides = CSlideShow()
 
-    Izing = CLattice2d(kT=3)
-    Izing.task_video_to_equilibrium()
+    Izing = CLattice2d(kT=1)
+    #Izing.init_lattice(2)
+    #Izing.init_subLattice(Izing.Aij_lattice,-1,1,-1,1)
+    #Izing.init_subLattice(Izing.kT_lattice,0.1,0.1,3,3)
+    Izing.task_video_to_equilibrium(kind=1)
     #Izing.task_heat_capacity()
-    #Izing.task_magnetization()
 
 
 def main_profile():
@@ -261,5 +302,5 @@ def main_profile():
     
 
 if __name__=='__main__':
-    main()
-    #main_profile()
+    #main()
+    main_profile()
